@@ -122,7 +122,7 @@ app.use((err, req, res, next) => {
   }
 });
 
-// Helper for cleaning up files safely
+// Helper for cleaning up files
 function cleanupFiles(paths) {
   paths.forEach((p) => {
     try {
