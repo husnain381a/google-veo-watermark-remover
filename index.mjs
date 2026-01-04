@@ -6,7 +6,6 @@ import ffmpegPath from "ffmpeg-static";
 import fs from "fs";
 import path from "path";
 import { fileURLToPath } from "url";
-import { exec } from "child_process";
 
 // ==========================================
 // SETUP & DIRECTORIES
@@ -14,6 +13,7 @@ import { exec } from "child_process";
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
+// Set FFmpeg binary path
 ffmpeg.setFfmpegPath(ffmpegPath);
 
 const app = express();
@@ -33,20 +33,6 @@ const OUTPUT_DIR = process.env.RAILWAY_ENVIRONMENT ? "/tmp/outputs" : "./outputs
 });
 
 // ==========================================
-// RAILWAY MEMORY FIX (SWAP FILE)
-// ==========================================
-if (process.env.RAILWAY_ENVIRONMENT) {
-  console.log("Attempting to create Swap file for extra RAM...");
-  exec("fallocate -l 512M /swapfile && chmod 600 /swapfile && mkswap /swapfile && swapon /swapfile", (err) => {
-    if (err) {
-      console.warn("Could not create swap file (Non-critical):", err.message);
-    } else {
-      console.log("Success: +512MB Swap Memory enabled.");
-    }
-  });
-}
-
-// ==========================================
 // MULTER CONFIG
 // ==========================================
 const storage = multer.diskStorage({
@@ -54,6 +40,7 @@ const storage = multer.diskStorage({
     cb(null, UPLOAD_DIR);
   },
   filename: (_, file, cb) => {
+    // Sanitize filename to prevent issues with special characters
     const safeName = Date.now() + "-" + file.originalname.replace(/[^a-zA-Z0-9.]/g, "_");
     cb(null, safeName);
   },
@@ -98,13 +85,14 @@ app.post("/process-video", upload.single("video"), (req, res) => {
         "-preset ultrafast",          
         "-max_muxing_queue_size 256",  
         "-crf 28",                     
-        "-movflags faststart"          
+        "-movflags faststart"         
     ])
     .on("start", (cmd) => {
         console.log("Spawned FFmpeg with RAM optimization");
     })
     .on("end", () => {
       console.log("Processing finished successfully.");
+      
       res.download(outputPath, "clean.mp4", (err) => {
         if (err && !res.headersSent) {
              console.error("Download Error:", err);
@@ -114,26 +102,20 @@ app.post("/process-video", upload.single("video"), (req, res) => {
       });
     })
     .on("error", (err, stdout, stderr) => {
-      // DETECT OOM KILLS
-      const isOOM = err.message.includes("SIGKILL") || err.message.includes("137");
+      console.error(`FFmpeg Error: ${err.message}`);
       
-      console.error(isOOM ? "FFmpeg process was KILLED (Out of Memory)" : `FFmpeg Error: ${err.message}`);
-      if (stderr) console.error("FFmpeg Stderr:", stderr);
+      // Check for Memory limit errors
+      if (err.message.includes("SIGKILL") || err.message.includes("137")) {
+          console.error("CRITICAL: Process killed by Railway Memory Limit.");
+      }
 
       cleanupFiles([inputPath, outputPath]);
 
       if (!res.headersSent) {
-        if (isOOM) {
-            res.status(507).json({
-                error: "Server Memory Exceeded",
-                details: "The video is too complex for the free server. Please try a smaller file or lower resolution."
-            });
-        } else {
-            res.status(500).json({ 
-                error: "Processing Failed", 
-                details: "An error occurred while processing the video." 
-            });
-        }
+        res.status(500).json({ 
+            error: "Processing Failed", 
+            details: "The server is busy or the video is too complex. Try a smaller file." 
+        });
       }
     })
     .save(outputPath);
@@ -168,7 +150,7 @@ function cleanupFiles(paths) {
     try {
       if (fs.existsSync(p)) fs.unlinkSync(p);
     } catch (e) { 
-        // Ignore unlink errors
+        // Ignore unlink errors (file might already be gone)
     }
   });
 }
